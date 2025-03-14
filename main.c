@@ -137,70 +137,104 @@ TokenizerOutput tokenize(StringView code)
 typedef struct ASTNode
 {
     TokenType type;
-    int value;
-    struct ASTNode* left;
-    struct ASTNode* right;
+    int integer_value; // Only used when type is an integer
+    struct ASTNode* left; // If type is an arithmetic operation, left addend/factor
+    struct ASTNode* right; // If type is an arithmetic operation, right addend/factor
 } ASTNode;
 
-typedef struct Parser
+typedef struct TokenParser
 {
-    TokenizerOutput* tokenizer;
-    int current_token;
-} Parser;
+    TokenizerOutput* tokenizer; // List of tokens that we got from lexing
+    int current_token; // Which token we're currently looking at
+} TokenParser;
 
-Token* peek(Parser* parser) {
-    return (parser->current_token < parser->tokenizer->token_count) ? &parser->tokenizer->tokens[parser->current_token] : NULL;
+// Looks at the next token, but doesn't get rid of it yet
+Token* peek(TokenParser* parser) {
+    // If we've reached the end, return NULL (a pointer that points to nothing)
+    if (parser->current_token >= parser->tokenizer->token_count)
+    {
+         return NULL;
+    }
+    // Otherwise, we return the address of the next token
+    return &parser->tokenizer->tokens[parser->current_token];
 }
 
-Token* consume(Parser* parser) {
-    return (parser->current_token < parser->tokenizer->token_count) ? &parser->tokenizer->tokens[parser->current_token++] : NULL;
+// Looks at the next token and gets rid of it
+Token* consume(TokenParser* parser) {
+    // If we've reached the end, return NULL (a pointer that points to nothing)
+    if (parser->current_token >= parser->tokenizer->token_count)
+    {
+        return NULL;
+    }
+    Token* address = &parser->tokenizer->tokens[parser->current_token]; // Get the address of the next token
+    parser->current_token += 1; // Move to the next token
+    return address; // Return the address
 }
 
-ASTNode* parse_factor(Parser* parser);
-ASTNode* parse_term(Parser* parser);
-ASTNode* parse_expression(Parser* parser);
+ASTNode* parse_integer(TokenParser* parser);
+ASTNode* parse_mul_div(TokenParser* parser);
+ASTNode* parse_add_sub(TokenParser* parser);
 
+// Requests memory for a new node, then stores the node data
 ASTNode* create_node(TokenType type, int value, ASTNode* left, ASTNode* right) {
     ASTNode* node = (ASTNode*)malloc(sizeof(ASTNode));
     node->type = type;
-    node->value = value;
+    node->integer_value = value;
     node->left = left;
     node->right = right;
     return node;
 }
 
-ASTNode* parse_factor(Parser* parser) {
+ASTNode* parse_integer(TokenParser* parser) {
     Token* token = consume(parser);
     if (token->type == TokenTypeInteger) {
+        // We need to convert the token from a string of characters ("123") to an integer (123)
         int total = 0;
         for (int i = 0; i < token->text.len; i++)
         {
-            total *= 10;
-            total += token->text.buffer[i] - '0';
+            total *= 10; // Shifts the total left by 1 digit: 12 -> 120
+            total += token->text.buffer[i] - '0'; // This converts a character into a digit ('3' -> 3)
+            // In total this loop appends the next digit to the end: 12 -> 123
         }
         return create_node(TokenTypeInteger, total, NULL, NULL);
     } else if (token->type == TokenTypeParenOpen) {
-        ASTNode* node = parse_expression(parser);
+        ASTNode* node = parse_add_sub(parser);
         consume(parser); // Expect closing parenthesis
         return node;
     }
     return NULL;
 }
 
-ASTNode* parse_term(Parser* parser) {
-    ASTNode* node = parse_factor(parser);
-    while (peek(parser) && (peek(parser)->type == TokenTypeTimes || peek(parser)->type == TokenTypeDivide)) {
-        Token* op = consume(parser);
-        node = create_node(op->type, 0, node, parse_factor(parser));
+ASTNode* parse_mul_div(TokenParser* parser) {
+    // Node starts off as an integer (the first factor in our multiplication)
+    ASTNode* node = parse_integer(parser);
+    Token* next_token = peek(parser); // Look at the next token, but don't consume it yet
+    // If the next token is a times or a divide, we convert node into a mul/div operation.
+    // Otherwise, we don't do anything and it stays an integer
+    while (next_token && (next_token->type == TokenTypeTimes || next_token->type == TokenTypeDivide)) {
+        next_token = consume(parser); // Now that we know the next token is a mul/div, we can consume it
+        // Create a multiplication/division where the left is the first factor,
+        // and the right is the next integer in the token list
+        node = create_node(next_token->type, 0, node, parse_integer(parser));
+        next_token = peek(parser); // Check for more * or / (e.g. 1 * 2 * 3)
     }
     return node;
 }
 
-ASTNode* parse_expression(Parser* parser) {
-    ASTNode* node = parse_term(parser);
-    while (peek(parser) && (peek(parser)->type == TokenTypePlus || peek(parser)->type == TokenTypeMinus)) {
-        Token* op = consume(parser);
-        node = create_node(op->type, 0, node, parse_term(parser));
+ASTNode* parse_add_sub(TokenParser* parser) {
+    // Multiplication comes first before addition, so if the first term is a multiplication operation we do that first
+    // e.g. 1 * 2 + 3 -> the first thing is a multiplication, so we do that first
+    ASTNode* node = parse_mul_div(parser);
+    Token* next_token = peek(parser); // Look at the next token, but don't consume it yet
+    // If the next token is an addition or subtraction, we convert node into a add/sub operation.
+    // Otherwise, we don't do anything and it stays an integer
+    while (next_token && (next_token->type == TokenTypePlus || next_token->type == TokenTypeMinus)) {
+        next_token = consume(parser); // Now that we know the next token is an add/sub, we can consume it
+        // We create an addition/subtraction where the left is the first addend, but we have to check
+        // if the right is multiplication, so we can handle 1 + 2 * 3. For that expression, node would
+        // be 1, and parse_mul_div(parser) would handle the 2 * 3
+        node = create_node(next_token->type, 0, node, parse_mul_div(parser));
+        next_token = peek(parser); // Check for more + or - (e.g. 1 + 2 + 3)
     }
     return node;
 }
@@ -213,7 +247,7 @@ int evaluate_node(ASTNode node)
         assert(0 && "Null token type found");
         return 0;
     case TokenTypeInteger:
-        return node.value;
+        return node.integer_value;
     case TokenTypePlus:
        return evaluate_node(*node.left) + evaluate_node(*node.right);
     case TokenTypeMinus:
@@ -235,8 +269,8 @@ int main(void)
     StringView content = read_file("program.sigc");
     TokenizerOutput output = tokenize(content);
 
-    Parser parser = (Parser){ .tokenizer = &output, 0 };
-    ASTNode* node = parse_expression(&parser);
+    TokenParser parser = (TokenParser){ .tokenizer = &output, 0 };
+    ASTNode* node = parse_add_sub(&parser);
     int result = evaluate_node(*node);
 
     printf("Program result: %i\n", result);
